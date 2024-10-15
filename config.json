@@ -1,0 +1,5 @@
+{
+    "Hostname": "0.0.0.0",
+    "Port": "5001",
+    "Loglevel": "info"
+}
