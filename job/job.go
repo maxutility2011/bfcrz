@@ -13,6 +13,5 @@ type Reencode_params struct {
 }*/
 
 type JobParams struct {
-	//Ingest_frame_rate string
-	//Reenc_params Reencode_params
+	Output_path string
 }
