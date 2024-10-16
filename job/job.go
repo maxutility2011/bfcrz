@@ -13,5 +13,11 @@ type Reencode_params struct {
 }*/
 
 type JobParams struct {
+	Input_path string
 	Output_path string
+}
+
+type Job struct {
+	Id string
+	Params JobParams
 }

@@ -12,7 +12,9 @@ import (
 	"os"
 	"io"
 	"os/exec"
+	"github.com/google/uuid"
 	"anumventures.com/wfa/job"
+	"anumventures.com/wfa/redis_client"
 )
 
 type ServerConfig struct {
@@ -20,6 +22,7 @@ type ServerConfig struct {
 	Port string
 	Loglevel string
 	File_storage string
+	Redis redis_client.RedisConfig
 }
 
 type AppLogLevel struct { 
@@ -67,6 +70,7 @@ var valid_log_levels = []string{"debug", "info", "warn", "error"}
 const MaxFileSizeMb = 50000 // 50GB
 var server_config ServerConfig
 var app_log_level slog.LevelVar
+var redis redis_client.RedisClient
 
 func loglevel_handler(w http.ResponseWriter, r *http.Request) {
 	slog.Info("----------------------------------------")
@@ -161,6 +165,65 @@ func run_authentication(input_file string, params job.JobParams) error {
 	return nil
 }
 
+/*
+func bufferJob(j job.LiveJob) error {
+	err := redis.QPushStruct(redis_client.REDIS_KEY_SCHEDULER_QUEUED_JOBS, j)
+	if err != nil {
+		Log.Println("Failed to buffer job id=", j.Id, ". Error: ", err)
+	}
+
+	return err
+}
+*/
+
+func createUpdateJob(j job.Job) error {
+	err := redis.HSetStruct(redis_client.REDIS_KEY_ALL_JOBS, j.Id, j)
+	if err != nil {
+		slog.Error("Failed to create/update job id=", j.Id, ". Error: ", err)
+	}
+
+	return err
+}
+
+func getJobById(jid string) (job.Job, error) {
+	var j job.Job
+	v, err := redis.HGet(redis_client.REDIS_KEY_ALL_JOBS, jid)
+	if err != nil {
+		slog.Error("Failed to find job id=", jid, ". Error: ", err)
+		return j, err
+	}
+
+	err = json.Unmarshal([]byte(v), &j)
+	if err != nil {
+		slog.Error("Failed to unmarshal Redis result (getJobById). Error: ", err)
+		return j, err
+	}
+
+	return j, nil
+}
+
+func createJob(p job.JobParams) (error, job.Job) {
+	var j job.Job
+	j.Id = uuid.New().String()
+	slog.Info("Generating a random job ID: ", j.Id)
+
+	j.Params = p
+	err := createUpdateJob(j)
+	if err != nil {
+		slog.Error("Error: Failed to create job ID: ", j.Id)
+		return err, j
+	}
+
+	j2, err2 := getJobById(j.Id)
+	if err2 != nil {
+		slog.Error("Error: Failed to find job ID: ", j.Id)
+		return err2, j2
+	}
+
+	slog.Error("New job created: %+v\n", j2)
+	return nil, j2
+}
+
 func upload_handler(w http.ResponseWriter, r *http.Request) {
 	slog.Info("----------------------------------------")
 	slog.Info("Received new request to upload video:")
@@ -218,8 +281,14 @@ func upload_handler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		w.WriteHeader(http.StatusAccepted)
+		e1, _ := createJob(params)
+		if e1 != nil {
+			http.Error(w, "500 internal server error\n  Error: ", http.StatusInternalServerError)
+			return
+		}
 
+		w.WriteHeader(http.StatusAccepted)
+/*
 		slog.Info("Params:", params)
 		err = run_authentication(handler.Filename, params)
 		if err != nil {
@@ -228,15 +297,8 @@ func upload_handler(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "500 internal server error\n  Error: "+res, http.StatusInternalServerError)
 			return
 		}
+*/
 	}
-
-	/*
-	e1, j := createJob(jspec, warnings)
-	if e1 != nil {
-		http.Error(w, "500 internal server error\n  Error: ", http.StatusInternalServerError)
-		return
-	}
-		*/
 }
 
 func main() {
@@ -273,6 +335,10 @@ func main() {
 
 	h := slog.NewTextHandler(logfile, &slog.HandlerOptions{Level: &app_log_level})
 	slog.SetDefault(slog.New(h))
+
+	redis.RedisIp = server_config.Redis.RedisIp
+	redis.RedisPort = server_config.Redis.RedisPort
+	redis.Client, redis.Ctx = redis.CreateClient(redis.RedisIp, redis.RedisPort)
 
 	server_addr := server_config.Hostname + ":" + server_config.Port
 	
