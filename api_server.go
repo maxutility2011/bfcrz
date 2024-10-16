@@ -3,15 +3,15 @@ package main
 import (
 	"flag"
 	"fmt"
-	//"time"
-	//"errors"
+	"time"
+	"errors"
 	"io/ioutil"
 	"encoding/json"
 	"log/slog" // requires golang 1.22+
 	"net/http"
 	"os"
 	"io"
-	//"os/exec"
+	"os/exec"
 	"anumventures.com/wfa/job"
 )
 
@@ -19,6 +19,7 @@ type ServerConfig struct {
 	Hostname string
 	Port string
 	Loglevel string
+	File_storage string
 }
 
 type AppLogLevel struct { 
@@ -63,8 +64,9 @@ func contains_string(a []string, v string) bool {
 }
 
 var valid_log_levels = []string{"debug", "info", "warn", "error"}
-var app_log_level slog.LevelVar
 const MaxFileSizeMb = 50000 // 50GB
+var server_config ServerConfig
+var app_log_level slog.LevelVar
 
 func loglevel_handler(w http.ResponseWriter, r *http.Request) {
 	slog.Info("----------------------------------------")
@@ -107,7 +109,7 @@ func loglevel_handler(w http.ResponseWriter, r *http.Request) {
 
 		if !contains_string(valid_log_levels, l.Loglevel) {
 			slog.Error("Invalid log level")
-			res := "Invalid log level " + l.Loglevel
+			res := "Invalid log level: " + l.Loglevel
 			slog.Error(res)
 			http.Error(w, "400 bad request\n  Error: "+res, http.StatusBadRequest)
 			return
@@ -116,6 +118,47 @@ func loglevel_handler(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
 		}
 	}
+}
+
+func run_frame_diff(input_file string) (error, string) {
+	frame_diff_args, diff_output := job.Get_frame_diff_args(input_file)
+	slog.Info("Frame diff command:")
+	slog.Info(job.ArgumentArrayToString(frame_diff_args))
+
+	frame_diff_cmd := exec.Command("ffmpeg", frame_diff_args...)
+	var err error
+	var out []byte
+	go func() {
+		out, err = frame_diff_cmd.CombinedOutput() // This line blocks after frame_diff_cmd launches
+		if err != nil {
+			slog.Error("Errors starting frame diff command: ", err, ". Command output: ", string(out))
+			// os.Exit(1) // Do not exit worker_transcoder here since ffmpeg also needs to be stopped after the packager is stopped. Let function manageCommand() to handle this.
+		}
+	}()
+
+	time.Sleep(100 * time.Millisecond)
+	if err != nil {
+		slog.Error("Error: ", string(out))
+		return errors.New(string(out)), diff_output
+		//os.Exit(1)
+	}
+
+	return err, diff_output
+}
+
+func run_authentication(input_file string, params job.JobParams) error {
+	err_diff, diff_output := run_frame_diff(input_file)
+	if err_diff != nil {
+		slog.Error("Errors starting frame diff command. Error message:", err_diff)
+		return errors.New("fail_to_authenticate_input")
+	}
+
+	_, err_stat := os.Stat(diff_output)
+	if errors.Is(err_stat, os.ErrNotExist) {
+		return errors.New("fail_to_create_frame_diff_output")
+	}
+
+	return nil
 }
 
 func upload_handler(w http.ResponseWriter, r *http.Request) {
@@ -131,7 +174,6 @@ func upload_handler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if r.Method == "POST" {
-		// curl -F "file=@./output.mp4" -F "params={\"frame_rate\":25,\"reencode_codec\":\"h264\"};type=application/json" http://localhost:5001/detect
 		r.Body = http.MaxBytesReader(w, r.Body, MaxFileSizeMb << 20) // Uploaded video file size limit: 500 MB
 		err := r.ParseMultipartForm(MaxFileSizeMb << 20) // 50 GB limit for file parsing
 		if err != nil {
@@ -176,8 +218,16 @@ func upload_handler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		w.WriteHeader(http.StatusAccepted)
+
 		slog.Info("Params:", params)
-		//run_detection(handler.Filename, params)
+		err = run_authentication(handler.Filename, params)
+		if err != nil {
+			res := "Failed to authenticate input video."
+			slog.Error("Failed to authenticate input video. Error: ", err)
+			http.Error(w, "500 internal server error\n  Error: "+res, http.StatusInternalServerError)
+			return
+		}
 	}
 
 	/*
@@ -200,7 +250,7 @@ func main() {
 		config_file_path = "config.json"
 	}
 
-	server_config := readConfig(config_file_path)
+	server_config = readConfig(config_file_path)
 	if server_config.Loglevel == "" {
 		app_log_level.Set(slog.LevelError)
 	} else if server_config.Loglevel == "debug" {

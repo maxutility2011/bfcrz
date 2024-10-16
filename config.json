@@ -1,5 +1,6 @@
 {
     "Hostname": "0.0.0.0",
     "Port": "5001",
-    "Loglevel": "info"
+    "Loglevel": "info",
+    "File_storage": "/tmp/"
 }
